@@ -1,0 +1,83 @@
+# Builds RSSHub with its own Dockerfile: the ordinary image, without Chromium,
+# for linux/amd64. A run with `push` ticked pushes it to
+# ghcr.io/regulad/rsshub, tagged with the source commit's full hash, as
+# upstream tags its per-commit images, so a change can run before upstream
+# merges it. The source comes from master (or the ref given to a manual run),
+# never from this branch.
+name: Build
+
+on:
+  push:
+    branches: [ci]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source ref to build (branch, tag or commit)
+        default: master
+      push:
+        description: Push the image to GHCR
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # Upstream's docker-release.yml gives the build this swap to ease its
+      # memory pressure; the same, run in line.
+      - name: Enable zram
+        run: |
+          sudo apt-get update -yq
+          sudo apt-get install -yq zram-tools
+          modinfo zram > /dev/null 2>&1 || sudo apt-get install -yq "linux-modules-extra-$(uname -r)"
+          echo -e 'ALGO=zstd\nPERCENT=100' | sudo tee -a /etc/default/zramswap
+          sudo systemctl restart zramswap
+          swapon
+
+      # With its .git: the image reads the commit hash from it.
+      - name: Check out the source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || 'master' }}
+          path: src
+
+      - name: Name the image after the source commit
+        id: image
+        working-directory: src
+        run: |
+          sha=$(git rev-parse HEAD)
+          echo "source: $(git log -1 --format='%H %s')"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=ghcr.io/${GITHUB_REPOSITORY,,}:$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The source label links the package to this repository; the revision is
+      # the source commit, not this branch's.
+      - name: Build, and push on request
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: src
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.image.outputs.sha }}
+          push: ${{ inputs.push == true }}
+          cache-from: type=gha,scope=build-linux-amd64
+          cache-to: type=gha,mode=max,scope=build-linux-amd64

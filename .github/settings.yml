@@ -1,0 +1,6 @@
+# Repository settings, applied by the Probot "Settings" app.
+# https://github.com/repository-settings/app
+
+repository:
+  # This branch, which holds the build pipeline; master is upstream's.
+  default_branch: ci
